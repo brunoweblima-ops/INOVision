@@ -2,7 +2,7 @@ const $ = (s) => document.querySelector(s);
 
 const video = $("#camera");
 const statusEl = $("#status");
-const captureBtn = $("#capture");
+const previewEl = $("#preview");
 const soundBtn = $("#sound");
 const scanView = $("#scan");
 const orderView = $("#order");
@@ -11,7 +11,6 @@ const itemsEl = $("#items");
 let orders = [];   // [{ id, items: [{ qty, name, mods, done }] }]
 let oi = 0;        // pedido atual
 let fi = 0;        // item focado
-let busy = false;
 
 /* ---------- guardar preferências (opcional) ---------- */
 const store = {
@@ -29,7 +28,7 @@ async function startCamera() {
       video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } },
       audio: false,
     });
-    setStatus("Aponta para o ecrã e carrega em Ler.");
+    setStatus("Aponta para o pedido…");
   } catch {
     setStatus("Sem acesso à câmara. Dá permissão e recarrega.", "err");
   }
@@ -209,44 +208,140 @@ function parseOrders(text) {
   return result.filter((o) => o.items.length).slice(0, 10);
 }
 
-/* ---------- ler o ecrã ---------- */
-async function readScreen() {
-  if (busy) return;
-  if (!video.videoWidth) return setStatus("A câmara ainda não está pronta.", "err");
+/* ---------- leitura automática ---------- */
+// Lê sem parar enquanto a imagem está quieta. Quando a mesma leitura aparece
+// CONFIRM vezes nas últimas HISTORY leituras, considera o pedido estável e abre-o.
+const CONFIRM = 2;
+const HISTORY = 4;
+const MOTION_LIMIT = 8;   // acima disto a câmara está a mexer (0–255)
 
-  busy = true;
-  captureBtn.disabled = true;
-  scanView.classList.add("busy");
-  setStatus("A ler…", "busy");
+let history = [];         // assinaturas das últimas leituras
+let lastFound = [];       // última leitura (para o preview e o Enter)
+let lastSig = "";
+let lastLockedSig = "";   // último pedido aberto (para não abrir o mesmo outra vez)
+let prevFrame = null;
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// "impressão digital" de uma leitura, para comparar leituras entre si
+function sigOf(list) {
+  return list
+    .map((o) => o.id + ":" + o.items
+      .map((i) => i.qty + norm(i.name).replace(/[^a-z0-9]/g, "") + "|" + i.mods.map((m) => norm(m).replace(/[^a-z0-9]/g, "")).join(","))
+      .join(";"))
+    .join("/");
+}
+
+// quanto a imagem mudou desde a última vez (miniatura em cinzento)
+const tiny = document.createElement("canvas");
+tiny.width = 48;
+tiny.height = 27;
+const tctx = tiny.getContext("2d", { willReadFrequently: true });
+function motion() {
+  tctx.drawImage(video, 0, 0, tiny.width, tiny.height);
+  const d = tctx.getImageData(0, 0, tiny.width, tiny.height).data;
+  const g = new Float32Array(d.length / 4);
+  for (let i = 0, p = 0; p < g.length; i += 4, p++) g[p] = (d[i] + d[i + 1] + d[i + 2]) / 3;
+  let diff = 255;
+  if (prevFrame) {
+    diff = 0;
+    for (let p = 0; p < g.length; p++) diff += Math.abs(g[p] - prevFrame[p]);
+    diff /= g.length;
+  }
+  prevFrame = g;
+  return diff;
+}
+
+async function scanLoop() {
+  let worker;
   try {
-    const worker = await getWorker();
-    const { data } = await worker.recognize(snapshot());
+    worker = await getWorker();
+  } catch {
+    return setStatus("Erro a carregar o leitor de texto. Recarrega a página.", "err");
+  }
 
-    orders = parseOrders(cleanText(data)).map((o) => ({
-      ...o,
-      items: o.items.map((i) => ({ ...i, done: false })),
-    }));
-
-    if (!orders.length) {
-      setStatus("Não vi nenhum pedido. Aproxima-te do ecrã.", "err");
-      speak("Não vi nenhum pedido");
-      return;
+  for (;;) {
+    if (!scanView.classList.contains("active") || !video.videoWidth || document.hidden) {
+      await sleep(300);
+      continue;
     }
 
-    oi = 0;
-    fi = 0;
-    show(orderView);
-    render();
-    speakOrder();
-    setStatus("Aponta para o ecrã e carrega em Ler.");
-  } catch (e) {
-    setStatus(e.message || "Erro ao ler.", "err");
-  } finally {
-    busy = false;
-    captureBtn.disabled = false;
-    scanView.classList.remove("busy");
+    // 1) esperar que a imagem fique quieta
+    if (motion() > MOTION_LIMIT) {
+      history = [];
+      scanView.classList.remove("busy");
+      setStatus("Segura quieto em frente ao pedido…");
+      await sleep(150);
+      continue;
+    }
+
+    // 2) ler
+    scanView.classList.add("busy");
+    let found = [];
+    try {
+      const { data } = await worker.recognize(snapshot());
+      found = parseOrders(cleanText(data));
+    } catch {
+      await sleep(500);
+      continue;
+    }
+    if (!scanView.classList.contains("active")) continue; // entretanto saiu deste ecrã
+
+    // a imagem mexeu durante a leitura? deita fora e recomeça
+    if (motion() > MOTION_LIMIT) { history = []; continue; }
+
+    const sig = sigOf(found);
+    lastFound = found;
+    lastSig = sig;
+    renderPreview(found);
+
+    if (!found.length) {
+      history = [];
+      setStatus("À procura de um pedido…");
+      await sleep(250);
+      continue;
+    }
+
+    // 3) ir corrigindo até estabilizar
+    history.push(sig);
+    if (history.length > HISTORY) history.shift();
+    const hits = history.filter((h) => h === sig).length;
+
+    if (hits < CONFIRM) {
+      setStatus(`A confirmar leitura… ${hits}/${CONFIRM}`, "busy");
+      continue;
+    }
+
+    if (sig === lastLockedSig) {
+      setStatus("Este pedido já foi aberto. Aponta para o próximo (Enter abre de novo).");
+      await sleep(400);
+      continue;
+    }
+
+    lock(found, sig);
   }
+}
+
+function lock(found, sig) {
+  orders = found.map((o) => ({ ...o, items: o.items.map((i) => ({ ...i, done: false })) }));
+  lastLockedSig = sig;
+  history = [];
+  oi = 0;
+  fi = 0;
+  scanView.classList.remove("busy");
+  navigator.vibrate?.(80);
+  show(orderView);
+  render();
+  speakOrder();
+}
+
+// mostra por baixo da câmara o que está a ser lido (vai-se corrigindo sozinho)
+function renderPreview(found) {
+  const items = found.flatMap((o) => o.items);
+  previewEl.innerHTML = items
+    .slice(0, 8)
+    .map((i) => `<li><b>${esc(i.qty)}</b> ${esc(i.name)}${i.mods.length ? ` <span>${i.mods.map(esc).join(" · ")}</span>` : ""}</li>`)
+    .join("");
 }
 
 /* ---------- desenhar ---------- */
@@ -298,6 +393,11 @@ function toggle() {
     if (items.every((it) => it.done)) {
       speak("Pedido completo");
       navigator.vibrate?.(200);
+      // volta sozinho à câmara para o próximo pedido
+      const current = orders;
+      setTimeout(() => {
+        if (orders === current && orderView.classList.contains("active") && current[oi].items.every((it) => it.done)) back();
+      }, 2500);
     }
   }
   render();
@@ -325,7 +425,7 @@ function speakOrder() {
 /* ---------- navegação (teclado / gestos dos óculos) ---------- */
 document.addEventListener("keydown", (e) => {
   if (scanView.classList.contains("active")) {
-    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); readScreen(); }
+    if ((e.key === "Enter" || e.key === " ") && lastFound.length) { e.preventDefault(); lock(lastFound, lastSig); }
     return;
   }
 
@@ -354,8 +454,10 @@ function switchOrder(dir) {
 
 function back() {
   speechSynthesis?.cancel();
+  history = [];
+  prevFrame = null;
+  previewEl.innerHTML = "";
   show(scanView);
-  captureBtn.focus();
 }
 
 /* ---------- util ---------- */
@@ -373,8 +475,6 @@ function esc(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
-captureBtn.addEventListener("click", readScreen);
-video.addEventListener("click", readScreen);
 soundBtn.addEventListener("click", () => {
   soundOn = !soundOn;
   store.set("sound", soundOn ? "1" : "0");
@@ -383,5 +483,4 @@ soundBtn.addEventListener("click", () => {
 });
 
 startCamera();
-getWorker().catch(() => setStatus("Erro a carregar o leitor de texto.", "err")); // pré-carrega
-captureBtn.focus();
+scanLoop();

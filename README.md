@@ -1,6 +1,6 @@
 # pedidos-glasses
 
-Web app para óculos Meta: aponta para o ecrã de pedidos, carrega em **Ler**, e mostra os pedidos como checklist (e lê-os em voz alta).
+Web app para óculos Meta: aponta para o ecrã de pedidos e ele lê sozinho. Vai corrigindo a leitura até ficar estável e depois mostra os pedidos como checklist (e lê-os em voz alta).
 
 100% grátis: o texto é lido no próprio browser com Tesseract.js. Não tem servidor nem chaves de API.
 
@@ -23,11 +23,12 @@ README.md
 
 | Ação | Tecla / gesto |
 |---|---|
-| Ler ecrã | Enter, ou tocar no vídeo/botão |
+| Ler ecrã | automático (segura quieto 2–3 s) |
+| Abrir já o que está a ser lido | Enter |
 | Mover entre itens | ↑ ↓ |
 | Marcar item | Enter |
 | Pedido seguinte/anterior | → ← |
-| Voltar à câmara | Esc |
+| Voltar à câmara | Esc (ou sozinho quando o pedido fica completo) |
 | Som on/off | botão 🔊 |
 
 ## Dicas para ler melhor
