@@ -35,33 +35,95 @@ async function startCamera() {
   }
 }
 
-/* Foto tratada para o OCR: cinzento, mais contraste, texto escuro em fundo claro */
+/* Recebe RGBA (Uint8ClampedArray), devolve RGBA limpo: texto preto em fundo branco, sem linhas */
+function cleanPixels(d, w, h) {
+  const N = w * h;
+  const g = new Float32Array(N);
+  for (let i = 0, p = 0; p < N; i += 4, p++) g[p] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+
+  // imagem integral para limiar adaptativo (aguenta sombras e reflexos)
+  const I = new Float64Array((w + 1) * (h + 1));
+  for (let y = 0; y < h; y++) {
+    let row = 0;
+    for (let x = 0; x < w; x++) {
+      row += g[y * w + x];
+      I[(y + 1) * (w + 1) + x + 1] = I[y * (w + 1) + x + 1] + row;
+    }
+  }
+  const r = Math.max(8, Math.round(Math.min(w, h) / 12));
+  const dark = new Uint8Array(N);
+  let darkCount = 0;
+  for (let y = 0; y < h; y++) {
+    const y0 = Math.max(0, y - r), y1 = Math.min(h, y + r + 1);
+    for (let x = 0; x < w; x++) {
+      const x0 = Math.max(0, x - r), x1 = Math.min(w, x + r + 1);
+      const s = I[y1 * (w + 1) + x1] - I[y0 * (w + 1) + x1] - I[y1 * (w + 1) + x0] + I[y0 * (w + 1) + x0];
+      const mean = s / ((x1 - x0) * (y1 - y0));
+      const v = g[y * w + x];
+      if (v < mean - 12) { dark[y * w + x] = 1; darkCount++; }
+    }
+  }
+
+  // ecrã escuro com letras claras → repete com a lógica invertida
+  if (darkCount > N * 0.5) for (let p = 0; p < N; p++) dark[p] ^= 1;
+
+  // apagar o que não é letra: linhas, bordas e pontinhos (componentes ligados)
+  const label = new Int32Array(N);
+  const stack = new Int32Array(N);
+  const minArea = Math.max(6, Math.round(N * 0.00002));
+  let cur = 0;
+  const comps = [];
+  for (let p0 = 0; p0 < N; p0++) {
+    if (!dark[p0] || label[p0]) continue;
+    cur++;
+    let sp = 0, area = 0, x0 = w, x1 = 0, y0 = h, y1 = 0;
+    stack[sp++] = p0; label[p0] = cur;
+    const pix = [];
+    while (sp) {
+      const p = stack[--sp];
+      pix.push(p);
+      const x = p % w, y = (p / w) | 0;
+      area++;
+      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+      if (x > 0 && dark[p - 1] && !label[p - 1]) { label[p - 1] = cur; stack[sp++] = p - 1; }
+      if (x < w - 1 && dark[p + 1] && !label[p + 1]) { label[p + 1] = cur; stack[sp++] = p + 1; }
+      if (y > 0 && dark[p - w] && !label[p - w]) { label[p - w] = cur; stack[sp++] = p - w; }
+      if (y < h - 1 && dark[p + w] && !label[p + w]) { label[p + w] = cur; stack[sp++] = p + w; }
+    }
+    const bw = x1 - x0 + 1, bh = y1 - y0 + 1;
+    const fill = area / (bw * bh);
+    const touchesEdge = x0 === 0 || y0 === 0 || x1 === w - 1 || y1 === h - 1;
+    const isLine = bw > 5 * bh || (bw > 2.5 * bh && fill < 0.25) || bh > 6 * bw && fill > 0.6;
+    const isBig = bw > w * 0.5 || bh > h * 0.3;
+    comps.push({ pix, bh, drop: touchesEdge || isLine || isBig || area < minArea });
+  }
+  // altura típica de uma letra → tira o que for muito mais pequeno (riscos, pó, reflexos)
+  const hs = comps.filter((c) => !c.drop).map((c) => c.bh).sort((a, b) => a - b);
+  const letterH = hs.length ? hs[Math.floor(hs.length * 0.6)] : 0;
+  for (const c of comps) {
+    if (c.drop || c.bh < letterH * 0.45) for (const p of c.pix) dark[p] = 0;
+  }
+
+  const out = new Uint8ClampedArray(N * 4);
+  for (let p = 0; p < N; p++) {
+    const v = dark[p] ? 0 : 255;
+    out[p * 4] = out[p * 4 + 1] = out[p * 4 + 2] = v;
+    out[p * 4 + 3] = 255;
+  }
+  return out;
+}
+
+/* Foto tratada para o OCR: preto e branco, sem linhas, bordas nem reflexos */
 function snapshot() {
   const w = video.videoWidth, h = video.videoHeight;
-  const scale = Math.min(2, 2000 / Math.max(w, h)); // aumenta imagens pequenas
+  const scale = Math.min(2, 1800 / Math.max(w, h)); // aumenta imagens pequenas
   const c = document.createElement("canvas");
   c.width = Math.round(w * scale);
   c.height = Math.round(h * scale);
   const ctx = c.getContext("2d", { willReadFrequently: true });
   ctx.drawImage(video, 0, 0, c.width, c.height);
-
   const img = ctx.getImageData(0, 0, c.width, c.height);
-  const d = img.data;
-  let sum = 0;
-  for (let i = 0; i < d.length; i += 4) {
-    const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-    d[i] = g;
-    sum += g;
-  }
-  const mean = sum / (d.length / 4);
-  const invert = mean < 110; // ecrã escuro com letras claras → inverte
-  for (let i = 0; i < d.length; i += 4) {
-    let g = d[i];
-    if (invert) g = 255 - g;
-    g = (g - 128) * 1.6 + 128; // contraste
-    g = Math.max(0, Math.min(255, g));
-    d[i] = d[i + 1] = d[i + 2] = g;
-  }
+  img.data.set(cleanPixels(img.data, c.width, c.height));
   ctx.putImageData(img, 0, 0);
   return c;
 }
@@ -70,8 +132,28 @@ function snapshot() {
 let workerPromise = null;
 function getWorker() {
   // carrega uma vez só e fica pronto para as próximas leituras
-  workerPromise ??= Tesseract.createWorker("por");
+  workerPromise ??= Tesseract.createWorker("por").then(async (w) => {
+    await w.setParameters({
+      tessedit_pageseg_mode: "6",       // bloco de texto (lista de linhas)
+      preserve_interword_spaces: "1",   // não colar palavras
+    });
+    return w;
+  });
   return workerPromise;
+}
+
+/* Junta as palavras de cada linha, deitando fora as que o OCR não tem certeza */
+function cleanText(data) {
+  return (data.lines || [])
+    .map((line) =>
+      line.words
+        .filter((wd) => wd.confidence >= 50)
+        .map((wd) => wd.text.replace(/^[^\p{L}\p{N}(+#-]+|[^\p{L}\p{N})]+$/gu, ""))
+        .filter((t) => t.length)
+        .join(" ")
+    )
+    .filter((l) => l.length)
+    .join("\n");
 }
 
 const norm = (s) => s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
@@ -141,7 +223,7 @@ async function readScreen() {
     const worker = await getWorker();
     const { data } = await worker.recognize(snapshot());
 
-    orders = parseOrders(data.text).map((o) => ({
+    orders = parseOrders(cleanText(data)).map((o) => ({
       ...o,
       items: o.items.map((i) => ({ ...i, done: false })),
     }));
