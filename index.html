@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="pt">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#000000" />
+  <title>Pedidos</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <main>
+    <!-- ECRÃ 1: câmara -->
+    <section id="scan" class="view active">
+      <header>
+        <h1>Ler pedido</h1>
+        <button id="sound" class="chip" type="button" aria-label="Som">🔊</button>
+      </header>
+
+      <div class="cam">
+        <video id="camera" autoplay playsinline muted></video>
+        <div class="frame"></div>
+      </div>
+
+      <div id="status">A ligar a câmara…</div>
+
+      <button id="capture" class="primary" type="button">Ler ecrã</button>
+    </section>
+
+    <!-- ECRÃ 2: pedido -->
+    <section id="order" class="view">
+      <header>
+        <div>
+          <h1 id="orderTitle">Pedido</h1>
+          <div id="orderNav" class="muted"></div>
+        </div>
+        <div id="progress">0/0</div>
+      </header>
+
+      <div class="bar"><div id="barFill"></div></div>
+
+      <ul id="items"></ul>
+
+      <div class="hint muted">↑↓ mover · Enter marcar · ←→ pedido · Esc voltar</div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
