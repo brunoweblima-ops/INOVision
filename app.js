@@ -6,11 +6,15 @@ const previewEl = $("#preview");
 const soundBtn = $("#sound");
 const scanView = $("#scan");
 const orderView = $("#order");
+const trainView = $("#train");
 const itemsEl = $("#items");
+const nowEl = $("#now");
+const visionEl = $("#vision");
+const classesEl = $("#classes");
 
-let orders = [];   // [{ id, items: [{ qty, name, mods, done }] }]
+let orders = [];   // [{ id, items: [{ qty, name, mods, done, steps: [{ name, done }] }] }]
 let oi = 0;        // pedido atual
-let fi = 0;        // item focado
+let fi = 0;        // produto atual
 
 /* ---------- guardar preferências (opcional) ---------- */
 const store = {
@@ -322,12 +326,52 @@ async function scanLoop() {
   }
 }
 
+/* ---------- receitas ---------- */
+const RECEITAS = window.RECEITAS || {};
+const NADA = window.CLASSE_NADA || "Nada";
+const nkey = (s) => norm(String(s)).replace(/[^a-z0-9]+/g, " ").trim();
+
+function allIngredients() {
+  const set = new Map();
+  for (const list of Object.values(RECEITAS)) for (const x of list) if (!set.has(nkey(x))) set.set(nkey(x), x);
+  return [...set.values()];
+}
+
+// passos de um produto, ajustados pelas alterações ("sem cebola", "+ bacon")
+function recipeFor(item) {
+  const name = nkey(item.name);
+  let best = null;
+  for (const key of Object.keys(RECEITAS)) {
+    const k = nkey(key);
+    if (k && name.includes(k) && (!best || k.length > nkey(best).length)) best = key;
+  }
+  if (!best) return [];
+
+  let steps = [...RECEITAS[best]];
+  const known = allIngredients();
+  for (const mod of item.mods || []) {
+    const m = nkey(mod);
+    const ing = known.find((x) => m.includes(nkey(x)));
+    if (!ing) continue;
+    if (/^(sem|s|menos)\b/.test(m)) steps = steps.filter((s) => nkey(s) !== nkey(ing));
+    else if (/^(extra|mais|com|c)\b/.test(m) || mod.trim().startsWith("+")) steps.push(ing);
+  }
+  return steps.map((name) => ({ name, done: false }));
+}
+
+const nextStep = (item) => item.steps.findIndex((s) => !s.done);
+const itemDone = (item) => (item.steps.length ? item.steps.every((s) => s.done) : item.done);
+
 function lock(found, sig) {
-  orders = found.map((o) => ({ ...o, items: o.items.map((i) => ({ ...i, done: false })) }));
+  orders = found.map((o) => ({
+    ...o,
+    items: o.items.map((i) => ({ ...i, done: false, steps: recipeFor(i) })),
+  }));
   lastLockedSig = sig;
   history = [];
   oi = 0;
   fi = 0;
+  lastFired = null;
   scanView.classList.remove("busy");
   navigator.vibrate?.(80);
   show(orderView);
@@ -344,30 +388,45 @@ function renderPreview(found) {
     .join("");
 }
 
-/* ---------- desenhar ---------- */
+/* ---------- desenhar o pedido ---------- */
 function render() {
   const order = orders[oi];
   const total = order.items.length;
-  const done = order.items.filter((i) => i.done).length;
+  const done = order.items.filter(itemDone).length;
 
   $("#orderTitle").textContent = order.id ? `Pedido ${order.id}` : "Pedido";
   $("#orderNav").textContent = orders.length > 1 ? `${oi + 1} de ${orders.length} pedidos` : "";
   $("#progress").textContent = `${done}/${total}`;
   $("#barFill").style.width = `${(done / total) * 100}%`;
 
+  // produto atual, com os passos que a câmara vai confirmando
+  const cur = order.items[fi];
+  const k = nextStep(cur);
+  nowEl.className = itemDone(cur) ? "done" : "";
+  nowEl.innerHTML = `
+    <div class="nowName"><span class="qty">${itemDone(cur) ? "✓" : esc(cur.qty)}</span><span>${esc(cur.name)}</span></div>
+    ${cur.mods.length ? `<div class="mods">${cur.mods.map(esc).join(" · ")}</div>` : ""}
+    ${cur.steps.length
+      ? `<div class="steps">${cur.steps.map((s, i) =>
+          `<span class="step ${s.done ? "done" : i === k ? "next" : ""}">${s.done ? "✓ " : ""}${esc(s.name)}</span>`).join("")}</div>`
+      : `<div class="muted">Sem receita — Enter para marcar</div>`}`;
+
+  // lista de todos os produtos
   itemsEl.innerHTML = "";
   order.items.forEach((item, i) => {
     const li = document.createElement("li");
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.className = "item" + (item.done ? " done" : "") + (i === fi ? " focused" : "");
+    btn.className = "item" + (itemDone(item) ? " done" : "") + (i === fi ? " focused" : "");
+    const prog = item.steps.length ? `${item.steps.filter((s) => s.done).length}/${item.steps.length}` : "";
     btn.innerHTML = `
-      <span class="qty">${item.done ? "✓" : esc(item.qty ?? 1)}</span>
-      <span class="txt">
-        <div class="name">${esc(item.name)}</div>
-        ${item.mods?.length ? `<div class="mods">${item.mods.map(esc).join(" · ")}</div>` : ""}
-      </span>`;
-    btn.addEventListener("click", () => { fi = i; toggle(); });
+      <span class="qty">${itemDone(item) ? "✓" : esc(item.qty ?? 1)}</span>
+      <span class="txt"><div class="name">${esc(item.name)}</div></span>
+      <span class="prog">${prog}</span>`;
+    btn.addEventListener("click", () => {
+      if (fi === i) markNext();
+      else { fi = i; render(); }
+    });
     li.appendChild(btn);
     itemsEl.appendChild(li);
   });
@@ -382,28 +441,243 @@ function render() {
   itemsEl.querySelectorAll(".item")[fi]?.scrollIntoView({ block: "nearest" });
 }
 
-function toggle() {
-  const items = orders[oi].items;
-  items[fi].done = !items[fi].done;
+// Enter: marca o próximo passo (ou o produto, se não tiver receita)
+function markNext() {
+  const item = orders[oi].items[fi];
+  if (item.steps.length) {
+    const k = nextStep(item);
+    if (k === -1) item.steps.forEach((s) => (s.done = false)); // já estava pronto → recomeça
+    else item.steps[k].done = true;
+  } else {
+    item.done = !item.done;
+  }
+  afterChange(item);
+}
 
-  if (items[fi].done) {
-    // salta para o próximo item por marcar
-    const next = items.findIndex((it, i) => i > fi && !it.done);
-    if (next !== -1) fi = next;
-    if (items.every((it) => it.done)) {
-      speak("Pedido completo");
-      navigator.vibrate?.(200);
-      // volta sozinho à câmara para o próximo pedido
-      const current = orders;
-      setTimeout(() => {
-        if (orders === current && orderView.classList.contains("active") && current[oi].items.every((it) => it.done)) back();
-      }, 2500);
+// Backspace: desfaz o último passo (para corrigir um engano da câmara)
+function undoStep() {
+  const item = orders[oi].items[fi];
+  if (item.steps.length) {
+    const last = item.steps.map((s) => s.done).lastIndexOf(true);
+    if (last !== -1) item.steps[last].done = false;
+  } else item.done = false;
+  render();
+}
+
+function afterChange(item) {
+  const items = orders[oi].items;
+
+  if (itemDone(item)) {
+    beep(880, 0.12);
+    // salta para o próximo produto por fazer
+    let next = items.findIndex((it, i) => i > fi && !itemDone(it));
+    if (next === -1) next = items.findIndex((it) => !itemDone(it));
+    if (next !== -1) {
+      fi = next; // (lastFired fica: o que está à frente da câmara não conta para o produto seguinte)
+      speak(`Próximo: ${items[fi].name}`);
     }
+  }
+
+  if (items.every(itemDone)) {
+    speak("Pedido completo");
+    navigator.vibrate?.(200);
+    // volta sozinho à câmara para o próximo pedido
+    const current = orders;
+    setTimeout(() => {
+      if (orders === current && orderView.classList.contains("active") && current[oi].items.every(itemDone)) back();
+    }, 2500);
   }
   render();
 }
 
-/* ---------- voz ---------- */
+/* ---------- visão: ver o que estás a meter ---------- */
+const MIN_CONF = 0.7;   // certeza mínima (0–1)
+const STEADY = 3;       // nº de imagens seguidas a ver a mesma coisa
+let streak = { label: null, n: 0 };
+let lastFired = null;   // última coisa confirmada (só volta a contar depois de ver outra)
+let msgUntil = 0;
+
+async function visionLoop() {
+  try {
+    await Visao.init();
+  } catch {
+    visionEl.textContent = "Visão indisponível (modelo não carregou).";
+    return;
+  }
+
+  for (;;) {
+    if (!orderView.classList.contains("active") || !Visao.trained() || document.hidden) {
+      if (orderView.classList.contains("active") && !Visao.trained() && Date.now() > msgUntil) {
+        visionEl.className = "muted";
+        visionEl.textContent = "👁 Câmara por treinar (🧠 no ecrã inicial)";
+      }
+      await sleep(400);
+      continue;
+    }
+
+    const p = Visao.predict(video);
+    await sleep(150);
+    if (!p || !orderView.classList.contains("active")) continue;
+
+    streak = p.label === streak.label ? { label: p.label, n: streak.n + 1 } : { label: p.label, n: 1 };
+
+    if (Date.now() > msgUntil) {
+      visionEl.className = "muted";
+      visionEl.textContent = p.label === NADA ? "👁 …" : `👁 ${p.label} ${Math.round(p.conf * 100)}%`;
+    }
+
+    if (streak.n >= STEADY && p.conf >= MIN_CONF && p.label !== lastFired) {
+      lastFired = p.label;
+      if (p.label !== NADA) onDetect(p.label);
+    }
+  }
+}
+
+function visionMsg(text, type) {
+  visionEl.className = type;
+  visionEl.textContent = text;
+  msgUntil = Date.now() + 3000;
+}
+
+function onDetect(label) {
+  const item = orders[oi].items[fi];
+  const L = nkey(label);
+
+  if (!item.steps.length) return visionMsg(`👁 ${label}`, "muted");
+
+  const k = nextStep(item);
+  if (k === -1) return visionMsg(`${item.name} já está pronto`, "warn");
+
+  // era mesmo o próximo passo
+  if (nkey(item.steps[k].name) === L) {
+    item.steps[k].done = true;
+    visionMsg(`✓ ${label}`, "ok");
+    beep(660, 0.08);
+    return afterChange(item);
+  }
+
+  // leva isto, mas ainda não é a vez
+  const later = item.steps.findIndex((s, i) => i > k && !s.done && nkey(s.name) === L);
+  if (later !== -1) {
+    item.steps[later].done = true;
+    visionMsg(`⚠ Fora de ordem: falta ${item.steps[k].name}`, "warn");
+    speak(`Atenção, falta ${item.steps[k].name}`);
+    navigator.vibrate?.([120, 80, 120]);
+    return afterChange(item);
+  }
+
+  // já tinha sido posto → ignora
+  if (item.steps.some((s) => nkey(s.name) === L)) return;
+
+  // não leva isto!
+  visionMsg(`✖ ${item.name} NÃO leva ${label}`, "err");
+  speak(`Atenção! Não leva ${label}`);
+  navigator.vibrate?.([250, 100, 250]);
+  beep(220, 0.3);
+}
+
+/* ---------- treino ---------- */
+let ci = 0;              // classe escolhida
+let recording = false;
+let clearArmed = 0;
+
+const trainClasses = () => [NADA, ...allIngredients().filter((x) => nkey(x) !== nkey(NADA))];
+
+function renderTrain() {
+  const cls = trainClasses();
+  ci = Math.min(ci, cls.length - 1);
+  $("#trainInfo").textContent = Visao.ready
+    ? (recording ? "● a gravar…" : `${Visao.labels().length} treinadas`)
+    : "A carregar modelo…";
+
+  classesEl.innerHTML = cls
+    .map((c, i) => {
+      const n = Visao.count(c);
+      const cls2 = ["cls", i === ci && "focused", recording && i === ci && "rec", n >= 30 && "ok"].filter(Boolean).join(" ");
+      return `<li><button type="button" class="${cls2}" data-i="${i}"><span>${esc(c)}${c === NADA ? " <small>(nada a acontecer)</small>" : ""}</span><b>${n}</b></button></li>`;
+    })
+    .join("");
+  classesEl.querySelectorAll("button").forEach((b) =>
+    b.addEventListener("click", () => {
+      const i = +b.dataset.i;
+      if (i !== ci && recording) toggleRec();
+      ci = i;
+      toggleRec();
+    })
+  );
+  classesEl.querySelectorAll(".cls")[ci]?.scrollIntoView({ block: "nearest" });
+}
+
+function toggleRec() {
+  if (!Visao.ready) return;
+  recording = !recording;
+  Visao.record(video, trainClasses()[ci], recording, renderTrain);
+  if (!recording) beep(440, 0.08);
+  renderTrain();
+}
+
+function stopRec() {
+  if (recording) toggleRec();
+}
+
+function clearClass() {
+  const btn = $("#clearBtn");
+  if (Date.now() < clearArmed) {
+    Visao.clear(trainClasses()[ci]);
+    clearArmed = 0;
+    btn.textContent = "Apagar";
+    renderTrain();
+  } else {
+    clearArmed = Date.now() + 3000;
+    btn.textContent = "Outra vez p/ apagar";
+    setTimeout(() => { if (Date.now() >= clearArmed) btn.textContent = "Apagar"; }, 3100);
+  }
+}
+
+function openTrain() {
+  show(trainView);
+  renderTrain();
+  Visao.init().then(renderTrain).catch(() => ($("#trainInfo").textContent = "Modelo não carregou"));
+}
+
+$("#trainBtn").addEventListener("click", openTrain);
+$("#clearBtn").addEventListener("click", clearClass);
+$("#exportBtn").addEventListener("click", () => {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([Visao.exportJSON()], { type: "application/json" }));
+  a.download = "modelo.json";
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+});
+$("#importFile").addEventListener("change", async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  try {
+    Visao.importJSON(await f.text());
+    $("#trainInfo").textContent = "Importado ✓";
+  } catch {
+    $("#trainInfo").textContent = "Ficheiro inválido";
+  }
+  e.target.value = "";
+  setTimeout(renderTrain, 1200);
+});
+
+/* ---------- som e voz ---------- */
+let audio;
+function beep(freq, dur) {
+  if (!soundOn) return;
+  try {
+    audio ??= new (window.AudioContext || window.webkitAudioContext)();
+    const o = audio.createOscillator(), g = audio.createGain();
+    o.frequency.value = freq;
+    g.gain.setValueAtTime(0.15, audio.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, audio.currentTime + dur);
+    o.connect(g).connect(audio.destination);
+    o.start();
+    o.stop(audio.currentTime + dur);
+  } catch {}
+}
+
 function speak(text) {
   if (!soundOn || !("speechSynthesis" in window)) return;
   speechSynthesis.cancel();
@@ -424,22 +698,40 @@ function speakOrder() {
 
 /* ---------- navegação (teclado / gestos dos óculos) ---------- */
 document.addEventListener("keydown", (e) => {
-  if (scanView.classList.contains("active")) {
-    if ((e.key === "Enter" || e.key === " ") && lastFound.length) { e.preventDefault(); lock(lastFound, lastSig); }
-    return;
+  const view = [scanView, orderView, trainView].find((v) => v.classList.contains("active"));
+  let keys = {};
+
+  if (view === scanView) {
+    keys = {
+      Enter: () => lastFound.length && lock(lastFound, lastSig),
+      t: openTrain,
+      T: openTrain,
+    };
+  } else if (view === orderView) {
+    const n = orders[oi].items.length;
+    keys = {
+      ArrowDown: () => { fi = Math.min(fi + 1, n - 1); lastFired = null; render(); },
+      ArrowUp: () => { fi = Math.max(fi - 1, 0); lastFired = null; render(); },
+      Enter: markNext,
+      " ": markNext,
+      Backspace: undoStep,
+      ArrowRight: () => switchOrder(1),
+      ArrowLeft: () => switchOrder(-1),
+      Escape: back,
+    };
+  } else if (view === trainView) {
+    const n = trainClasses().length;
+    keys = {
+      ArrowDown: () => { stopRec(); ci = Math.min(ci + 1, n - 1); renderTrain(); },
+      ArrowUp: () => { stopRec(); ci = Math.max(ci - 1, 0); renderTrain(); },
+      Enter: toggleRec,
+      " ": toggleRec,
+      Delete: clearClass,
+      Backspace: clearClass,
+      Escape: back,
+    };
   }
 
-  const n = orders[oi].items.length;
-  const keys = {
-    ArrowDown: () => { fi = Math.min(fi + 1, n - 1); render(); },
-    ArrowUp: () => { fi = Math.max(fi - 1, 0); render(); },
-    Enter: () => toggle(),
-    " ": () => toggle(),
-    ArrowRight: () => switchOrder(1),
-    ArrowLeft: () => switchOrder(-1),
-    Escape: () => back(),
-    Backspace: () => back(),
-  };
   if (keys[e.key]) { e.preventDefault(); keys[e.key](); }
 });
 
@@ -448,11 +740,13 @@ function switchOrder(dir) {
   if (next < 0 || next >= orders.length) return;
   oi = next;
   fi = 0;
+  lastFired = null;
   render();
   speakOrder();
 }
 
 function back() {
+  stopRec();
   speechSynthesis?.cancel();
   history = [];
   prevFrame = null;
@@ -462,8 +756,17 @@ function back() {
 
 /* ---------- util ---------- */
 function show(view) {
-  scanView.classList.toggle("active", view === scanView);
-  orderView.classList.toggle("active", view === orderView);
+  for (const v of [scanView, orderView, trainView]) v.classList.toggle("active", v === view);
+  // o vídeo muda para o ecrã ativo; no pedido fica escondido (só para a câmara ver)
+  const slot = view.querySelector("[data-slot]");
+  if (slot) {
+    slot.prepend(video);
+    video.classList.remove("parked");
+  } else {
+    document.body.appendChild(video);
+    video.classList.add("parked");
+  }
+  video.play?.().catch(() => {});
 }
 
 function setStatus(text, type = "") {
@@ -482,5 +785,7 @@ soundBtn.addEventListener("click", () => {
   if (!soundOn) speechSynthesis?.cancel();
 });
 
+show(scanView);
 startCamera();
 scanLoop();
+visionLoop();

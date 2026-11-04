@@ -9,17 +9,20 @@
 </head>
 <body>
   <main>
-    <!-- ECRÃ 1: câmara -->
+    <!-- vídeo único, mudado de sítio conforme o ecrã -->
+    <video id="camera" autoplay playsinline muted></video>
+
+    <!-- ECRÃ 1: ler pedido (automático) -->
     <section id="scan" class="view active">
       <header>
         <h1>Ler pedido</h1>
-        <button id="sound" class="chip" type="button" aria-label="Som">🔊</button>
+        <div class="row">
+          <button id="trainBtn" class="chip" type="button" aria-label="Treinar">🧠</button>
+          <button id="sound" class="chip" type="button" aria-label="Som">🔊</button>
+        </div>
       </header>
 
-      <div class="cam">
-        <video id="camera" autoplay playsinline muted></video>
-        <div class="frame"></div>
-      </div>
+      <div class="cam" data-slot><div class="frame"></div></div>
 
       <div id="status">A ligar a câmara…</div>
 
@@ -27,7 +30,7 @@
       <ul id="preview"></ul>
     </section>
 
-    <!-- ECRÃ 2: pedido -->
+    <!-- ECRÃ 2: montar o pedido -->
     <section id="order" class="view">
       <header>
         <div>
@@ -39,13 +42,40 @@
 
       <div class="bar"><div id="barFill"></div></div>
 
+      <!-- produto atual + passos que a câmara vai confirmando -->
+      <div id="now"></div>
+      <div id="vision" class="muted"></div>
+
       <ul id="items"></ul>
 
-      <div class="hint muted">↑↓ mover · Enter marcar · ←→ pedido · Esc voltar</div>
+      <div class="hint muted">↑↓ produto · Enter marcar · ←→ pedido · Esc voltar</div>
+    </section>
+
+    <!-- ECRÃ 3: treinar a câmara -->
+    <section id="train" class="view">
+      <header>
+        <h1>Treinar</h1>
+        <div id="trainInfo" class="muted"></div>
+      </header>
+
+      <div class="cam small" data-slot><div class="frame"></div></div>
+
+      <ul id="classes"></ul>
+
+      <div class="row tools">
+        <button id="exportBtn" class="chip wide" type="button">Exportar</button>
+        <label class="chip wide">Importar<input id="importFile" type="file" accept=".json,application/json" hidden /></label>
+        <button id="clearBtn" class="chip wide" type="button">Apagar</button>
+      </div>
+
+      <div class="hint muted">↑↓ escolher · Enter gravar/parar · Del apagar · Esc voltar</div>
     </section>
   </main>
 
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+  <script src="/receitas.js"></script>
+  <script src="/visao.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>
