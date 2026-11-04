@@ -359,19 +359,33 @@ function recipeFor(item) {
   return steps.map((name) => ({ name, done: false }));
 }
 
+// "sem pickles", "s/ cebola" → ingredientes que NÃO podem entrar (funciona mesmo sem receita)
+function forbiddenFor(item) {
+  const known = [...allIngredients(), ...Visao.labels()];
+  const out = [];
+  for (const mod of item.mods || []) {
+    const m = nkey(mod);
+    if (!/^(sem|s|menos)\b/.test(m)) continue;
+    const ing = known.find((x) => m.includes(nkey(x)));
+    if (ing && !out.some((o) => nkey(o) === nkey(ing))) out.push(ing);
+  }
+  return out;
+}
+
 const nextStep = (item) => item.steps.findIndex((s) => !s.done);
 const itemDone = (item) => (item.steps.length ? item.steps.every((s) => s.done) : item.done);
 
 function lock(found, sig) {
   orders = found.map((o) => ({
     ...o,
-    items: o.items.map((i) => ({ ...i, done: false, steps: recipeFor(i) })),
+    items: o.items.map((i) => ({ ...i, done: false, steps: recipeFor(i), forbidden: forbiddenFor(i) })),
   }));
   lastLockedSig = sig;
   history = [];
   oi = 0;
   fi = 0;
   lastFired = null;
+  visionFrom = Date.now() + 1200;
   scanView.classList.remove("busy");
   navigator.vibrate?.(80);
   show(orderView);
@@ -405,6 +419,7 @@ function render() {
   nowEl.className = itemDone(cur) ? "done" : "";
   nowEl.innerHTML = `
     <div class="nowName"><span class="qty">${itemDone(cur) ? "✓" : esc(cur.qty)}</span><span>${esc(cur.name)}</span></div>
+    ${cur.forbidden.length ? `<div class="steps">${cur.forbidden.map((f) => `<span class="step no">✖ SEM ${esc(f)}</span>`).join("")}</div>` : ""}
     ${cur.mods.length ? `<div class="mods">${cur.mods.map(esc).join(" · ")}</div>` : ""}
     ${cur.steps.length
       ? `<div class="steps">${cur.steps.map((s, i) =>
@@ -490,12 +505,21 @@ function afterChange(item) {
   render();
 }
 
-/* ---------- visão: ver o que estás a meter ---------- */
-const MIN_CONF = 0.7;   // certeza mínima (0–1)
-const STEADY = 3;       // nº de imagens seguidas a ver a mesma coisa
+/* ---------- visão: ver o que está a ser metido ---------- */
+// Prioridade: apanhar RÁPIDO um ingrediente proibido ("sem pickles").
+// Os passos da receita são confirmados com mais calma (não tem de ser instantâneo).
+const ALERTA_CONF = 0.55;   // certeza mínima para um proibido (0–1)
+const ALERTA_FRAMES = 2;    // imagens seguidas para um proibido (~0,1–0,2 s)
+const PASSO_CONF = 0.7;     // certeza mínima para marcar um passo
+const PASSO_FRAMES = 3;     // imagens seguidas para marcar um passo
+const ORDEM_RIGOROSA = false; // true = avisa quando a ordem de montagem não bate certo
+
 let streak = { label: null, n: 0 };
 let lastFired = null;   // última coisa confirmada (só volta a contar depois de ver outra)
 let msgUntil = 0;
+let visionFrom = 0;     // ignora a câmara logo após abrir o pedido (ainda está a olhar para o ecrã)
+
+const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
 
 async function visionLoop() {
   try {
@@ -506,18 +530,19 @@ async function visionLoop() {
   }
 
   for (;;) {
-    if (!orderView.classList.contains("active") || !Visao.trained() || document.hidden) {
-      if (orderView.classList.contains("active") && !Visao.trained() && Date.now() > msgUntil) {
+    const active = orderView.classList.contains("active");
+    if (!active || !Visao.trained() || document.hidden) {
+      if (active && !Visao.trained() && Date.now() > msgUntil) {
         visionEl.className = "muted";
         visionEl.textContent = "👁 Câmara por treinar (🧠 no ecrã inicial)";
       }
-      await sleep(400);
+      await sleep(300);
       continue;
     }
 
-    const p = Visao.predict(video);
-    await sleep(150);
-    if (!p || !orderView.classList.contains("active")) continue;
+    const p = await Visao.predict(video);   // o mais rápido que o aparelho deixar
+    await nextFrame();
+    if (!p || !orderView.classList.contains("active") || Date.now() < visionFrom) continue;
 
     streak = p.label === streak.label ? { label: p.label, n: streak.n + 1 } : { label: p.label, n: 1 };
 
@@ -526,54 +551,72 @@ async function visionLoop() {
       visionEl.textContent = p.label === NADA ? "👁 …" : `👁 ${p.label} ${Math.round(p.conf * 100)}%`;
     }
 
-    if (streak.n >= STEADY && p.conf >= MIN_CONF && p.label !== lastFired) {
+    if (p.label === lastFired) continue;
+    const item = orders[oi].items[fi];
+    const banned = item.forbidden.some((f) => nkey(f) === nkey(p.label));
+    const [conf, frames] = banned ? [ALERTA_CONF, ALERTA_FRAMES] : [PASSO_CONF, PASSO_FRAMES];
+
+    if (streak.n >= frames && p.conf >= conf) {
       lastFired = p.label;
       if (p.label !== NADA) onDetect(p.label);
     }
   }
 }
 
-function visionMsg(text, type) {
+function visionMsg(text, type, ms = 2500) {
   visionEl.className = type;
   visionEl.textContent = text;
-  msgUntil = Date.now() + 3000;
+  msgUntil = Date.now() + ms;
+}
+
+// alarme a ecrã inteiro: tem de se ver/ouvir logo
+let alarmTimer;
+function alarm(text) {
+  const el = $("#alarm");
+  el.textContent = text;
+  el.classList.add("on");
+  clearTimeout(alarmTimer);
+  alarmTimer = setTimeout(() => el.classList.remove("on"), 2500);
+  navigator.vibrate?.([300, 80, 300, 80, 300]);
+  beep(1400, 0.12);
+  setTimeout(() => beep(1400, 0.12), 160);
+  setTimeout(() => beep(1400, 0.2), 320);
+  speak(text);
 }
 
 function onDetect(label) {
   const item = orders[oi].items[fi];
   const L = nkey(label);
 
-  if (!item.steps.length) return visionMsg(`👁 ${label}`, "muted");
-
-  const k = nextStep(item);
-  if (k === -1) return visionMsg(`${item.name} já está pronto`, "warn");
-
-  // era mesmo o próximo passo
-  if (nkey(item.steps[k].name) === L) {
-    item.steps[k].done = true;
-    visionMsg(`✓ ${label}`, "ok");
-    beep(660, 0.08);
-    return afterChange(item);
+  // 1) proibido pelo pedido → ALARME
+  if (item.forbidden.some((f) => nkey(f) === L)) {
+    visionMsg(`✖ ${item.name}: SEM ${label.toUpperCase()}`, "err", 4000);
+    return alarm(`Sem ${label}!`);
   }
 
-  // leva isto, mas ainda não é a vez
-  const later = item.steps.findIndex((s, i) => i > k && !s.done && nkey(s.name) === L);
-  if (later !== -1) {
-    item.steps[later].done = true;
-    visionMsg(`⚠ Fora de ordem: falta ${item.steps[k].name}`, "warn");
-    speak(`Atenção, falta ${item.steps[k].name}`);
-    navigator.vibrate?.([120, 80, 120]);
+  if (!item.steps.length) return visionMsg(`👁 ${label}`, "muted");
+
+  // 2) faz parte da receita → marca (em qualquer ordem, a não ser que ORDEM_RIGOROSA)
+  const k = nextStep(item);
+  const idx = item.steps.findIndex((s) => !s.done && nkey(s.name) === L);
+  if (idx !== -1) {
+    if (ORDEM_RIGOROSA && idx !== k) {
+      visionMsg(`⚠ Fora de ordem: falta ${item.steps[k].name}`, "warn");
+      beep(500, 0.15);
+    } else {
+      visionMsg(`✓ ${label}`, "ok", 1200);
+      beep(660, 0.06);
+    }
+    item.steps[idx].done = true;
     return afterChange(item);
   }
 
   // já tinha sido posto → ignora
   if (item.steps.some((s) => nkey(s.name) === L)) return;
 
-  // não leva isto!
-  visionMsg(`✖ ${item.name} NÃO leva ${label}`, "err");
-  speak(`Atenção! Não leva ${label}`);
-  navigator.vibrate?.([250, 100, 250]);
-  beep(220, 0.3);
+  // 3) não está na receita (pode ser outro produto a ser feito) → aviso leve
+  visionMsg(`⚠ ${item.name} não leva ${label}?`, "warn");
+  beep(330, 0.15);
 }
 
 /* ---------- treino ---------- */

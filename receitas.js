@@ -8,6 +8,8 @@
 //    que usas no ecrã "Treinar" — são essas as coisas que a câmara aprende.
 //  • Se um ingrediente se repete (ex.: 2 carnes), escreve-o 2 vezes.
 //  • Produtos sem receita aparecem na lista para marcar à mão.
+//  • "sem X" no pedido = ALARME se a câmara vir X (funciona mesmo sem receita,
+//    basta X estar treinado).
 //
 //  Edita à vontade no GitHub — isto são só exemplos.
 // =====================================================================
@@ -18,6 +20,7 @@ window.RECEITAS = {
   "DUPLO":             ["Pão", "Carne", "Queijo", "Carne", "Queijo", "Ketchup", "Mostarda"],
   "FRANGO":            ["Pão", "Frango", "Molho", "Alface"],
   "BACON":             ["Pão", "Carne", "Queijo", "Bacon", "Molho"],
+  "ROYAL BACON":       ["Pão", "Carne", "Queijo", "Bacon", "Ketchup", "Mostarda", "Cebola", "Pickles"],
 
   "SALADA ATUM":       ["Alface", "Tomate", "Atum"],
   "SALADA FETA":       ["Alface", "Tomate", "Queijo"],

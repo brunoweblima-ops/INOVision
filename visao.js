@@ -37,17 +37,39 @@ const Visao = (() => {
     return loading;
   }
 
+  // Antes de ir para a rede, a imagem é reduzida a 224×224 numa canvas (rápido, feito pela GPU)
+  // em vez de passar a imagem inteira de 1080p para o TensorFlow.
+  const crop = document.createElement("canvas");
+  crop.width = crop.height = 224;
+  const cctx = crop.getContext("2d", { willReadFrequently: true });
+
+  function toTensor(video) {
+    const w = video.videoWidth, h = video.videoHeight, s = Math.min(w, h);
+    cctx.drawImage(video, (w - s) / 2, (h - s) / 2, s, s, 0, 0, 224, 224); // quadrado central
+    return tf.browser.fromPixels(crop).toFloat().div(127).sub(1).expandDims(0);
+  }
+
+  function embedTensor(video) {
+    return tf.tidy(() => {
+      const v = model.predict(toTensor(video)).squeeze();
+      return v.div(v.norm().add(1e-6));
+    });
+  }
+
   // imagem da câmara → vetor normalizado (Float32Array de 1280)
   function embed(video) {
-    return tf.tidy(() => {
-      const px = tf.browser.fromPixels(video);
-      const [h, w] = px.shape;
-      const s = Math.min(h, w); // quadrado central
-      const crop = px.slice([Math.floor((h - s) / 2), Math.floor((w - s) / 2), 0], [s, s, 3]);
-      const img = tf.image.resizeBilinear(crop, [224, 224]).toFloat().div(127).sub(1).expandDims(0);
-      const v = model.predict(img).squeeze();
-      return v.div(v.norm().add(1e-6));
-    }).dataSync();
+    const t = embedTensor(video);
+    const out = t.dataSync();
+    t.dispose();
+    return out;
+  }
+
+  // igual, mas sem bloquear o ecrã enquanto a GPU trabalha
+  async function embedAsync(video) {
+    const t = embedTensor(video);
+    const out = await t.data();
+    t.dispose();
+    return out;
   }
 
   /* ---------- guardar (int8 para caber no browser) ---------- */
@@ -91,27 +113,23 @@ const Visao = (() => {
 
   /* ---------- k-NN ---------- */
   function buildMem() {
-    const labels = [], vecs = [];
-    for (const [k, arr] of Object.entries(data)) {
-      for (const q of arr) {
-        const f = new Float32Array(q.length);
-        for (let i = 0; i < q.length; i++) f[i] = q[i] / (127 * 4);
-        labels.push(k);
-        vecs.push(f);
-      }
-    }
-    mem = { labels, vecs };
+    const labels = [];
+    const all = Object.entries(data).flatMap(([k, arr]) => arr.map((q) => (labels.push(k), q)));
+    const dim = all[0]?.length || 0;
+    const mat = new Float32Array(all.length * dim);
+    all.forEach((q, j) => { for (let i = 0; i < dim; i++) mat[j * dim + i] = q[i] / (127 * 4); });
+    mem = { labels, mat, dim, n: all.length };
   }
 
   function classify(vec) {
     if (!mem) buildMem();
-    const n = mem.vecs.length;
+    const { n, dim, mat } = mem;
     if (!n) return null;
     const sims = new Array(n);
     for (let j = 0; j < n; j++) {
-      const f = mem.vecs[j];
       let dot = 0;
-      for (let i = 0; i < f.length; i++) dot += f[i] * vec[i];
+      const o = j * dim;
+      for (let i = 0; i < dim; i++) dot += mat[o + i] * vec[i];
       sims[j] = [dot, mem.labels[j]];
     }
     sims.sort((a, b) => b[0] - a[0]);
@@ -149,9 +167,9 @@ const Visao = (() => {
 
     clear(label) { delete data[label]; mem = null; save(); },
 
-    predict(video) {
+    async predict(video) {
       if (!model || !video.videoWidth) return null;
-      return classify(embed(video));
+      return classify(await embedAsync(video));
     },
 
     exportJSON: () => JSON.stringify(serialize()),

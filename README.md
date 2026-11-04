@@ -3,7 +3,7 @@
 Web app para óculos Meta:
 
 1. **Lê o pedido sozinha.** Apontas para o ecrã de pedidos e ela vai corrigindo a leitura até ficar estável.
-2. **Vê o que estás a fazer.** Confirma cada ingrediente que metes (carne, molho, alface…) pela ordem da receita, e avisa quando falta alguma coisa ou quando metes algo que o produto não leva.
+2. **Vê quem está a fazer o hambúrguer.** Se o pedido diz `sem pickles` e a câmara vê pickles a entrar, dispara logo um **ALARME** a ecrã inteiro, com bip, vibração e voz. Os outros ingredientes da receita vão sendo confirmados pelo caminho.
 
 100% grátis e tudo no browser: o texto é lido com Tesseract.js e a imagem é reconhecida com TensorFlow.js. Não tem servidor nem chaves de API.
 
@@ -31,12 +31,14 @@ Abre o `receitas.js` e escreve os produtos com os nomes que aparecem no ecrã, e
 
 As alterações do pedido ajustam a receita: `sem cebola` tira a cebola e `+ bacon` acrescenta bacon (se o bacon existir noutra receita).
 
+**`sem X` funciona mesmo sem receita.** Basta o X estar treinado: se a câmara o vir, dispara o alarme.
+
 ## 2. Treinar a câmara
 
 No ecrã inicial, carrega em **🧠** (ou na tecla **T**).
 
 1. Escolhe a classe com ↑↓ e carrega em **Enter** para começar a gravar. Enter outra vez para parar. Grava cerca de 4 imagens por segundo.
-2. Grava **com os óculos postos e no teu posto**, a fazer o gesto real: por exemplo, a mão a pôr a carne no pão. Muda um pouco de ângulo enquanto gravas.
+2. Grava **com os óculos postos, a olhar como vais olhar a sério**, enquanto o colega mete aquele ingrediente: a mão com os pickles por cima do pão, a carne a cair, o molho a sair. Muda um pouco de ângulo enquanto gravas.
 3. Junta **30 a 80 imagens** por classe. O número fica verde aos 30.
 4. **Treina sempre o "Nada"**: a bancada parada, sem estares a meter nada. É isto que evita falsos alarmes.
 
@@ -61,8 +63,9 @@ O treino fica guardado no browser. Para o usares noutro aparelho, carrega em **E
 
 No `app.js`, na secção "visão":
 
-- `MIN_CONF` (0.7): certeza mínima. Sobe se houver falsos alarmes.
-- `STEADY` (3): quantas imagens seguidas tem de ver a mesma coisa. Sobe para ficar mais seguro, desce para ficar mais rápido.
+- `ALERTA_CONF` (0.55) e `ALERTA_FRAMES` (2): sensibilidade do alarme. Sobe para ter menos falsos alarmes, desce para ficar mais rápido.
+- `PASSO_CONF` (0.7) e `PASSO_FRAMES` (3): o mesmo, mas para confirmar os passos normais.
+- `ORDEM_RIGOROSA` (false): põe `true` para avisar quando a ordem de montagem não bate certo.
 
 ## Limites
 

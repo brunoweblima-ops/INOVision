@@ -203,3 +203,19 @@ video:not(.parked) {
 .cls.rec { border-color: var(--err); background: #2a0909; }
 .cls.rec b::before { content: "● "; color: var(--err); }
 .tools .wide { width: auto; flex: 1; height: 44px; font-size: 16px; border-radius: 12px; display: grid; place-items: center; }
+
+.step.no { border-color: var(--err); color: var(--err); }
+
+/* Alarme */
+#alarm {
+  position: fixed; inset: 0;
+  display: none; place-items: center;
+  padding: 24px;
+  background: #d40000;
+  color: #fff;
+  font-size: 64px; font-weight: 900; text-align: center; line-height: 1;
+  text-transform: uppercase;
+  z-index: 10;
+}
+#alarm.on { display: grid; animation: flash .25s steps(2) infinite; }
+@keyframes flash { 50% { background: #000; color: #ff3b3b; } }
